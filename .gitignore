@@ -1,0 +1,18 @@
+# Python & PyTorch artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pt
+*.pth
+*.pkl
+
+# Environments
+.env
+venv/
+env/
+ENV/
+
+# OS Specific
+.DS_Store
+Thumbs.db
+*.log
