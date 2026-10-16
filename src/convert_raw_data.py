@@ -1,164 +1,153 @@
 """
-ETL Pipeline: Parses Raw Bipolar EEG text dumps, applies signal conditioning,
-segments into 2.0s directional epochs, and exports both structured CSVs and PyTorch NPZ archives.
+ETL Pipeline: parses the raw multi-page EEG exports, filters each whole recording, cuts windows
+locked to the stimulus blocks of the video, and saves one NPZ per subject with full metadata.
+
+Labels come from the stimulus timeline (src/stimulus.py) and each file's offset
+(stimulus_offsets.json), never from file order.
 """
 
-import os
+import argparse
 import glob
-import re
+import os
+import shutil
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
 from src.config import (
-    RAW_DATA_DIR, CSV_TRIALS_DIR, TENSORS_DIR, METADATA_PATH,
-    CHANNELS, NUM_CHANNELS, SAMPLING_RATE, TRIAL_SAMPLES,
-    BANDPASS_LOW, BANDPASS_HIGH, NOTCH_FREQ, DIRECTIONS
+    RAW_DATA_DIR, CSV_TRIALS_DIR, TENSORS_DIR, METADATA_PATH, OFFSETS_PATH,
+    CHANNELS, NUM_CHANNELS, SAMPLING_RATE, TRIAL_SAMPLES, DIRECTIONS, BLANK_LABEL, ensure_dirs
 )
-from src.preprocessing import preprocess_continuous_eeg, robust_standardize
+from src.preprocessing import preprocess_continuous_eeg, robust_scale_recording, flag_artifacts
+from src.raw_io import parse_raw_txt_file, subject_from_folder
+from src.stimulus import FORMATS, load_offsets, offset_for, stimulus_windows
 
-def parse_raw_txt_file(file_path):
-    """
-    Parses bipolar channel arrays from raw multi-page text dump.
-    Returns: numpy array of shape (18, Total_Samples) or None if invalid.
-    """
-    channels_data = []
-    
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
 
-    # Split lines and extract continuous comma-separated numbers
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
+def subject_npz_name(subject):
+    clean = ''.join(ch if ch.isalnum() else '_' for ch in subject).lower()
+    return f"subject_{clean}.npz"
+
+
+def epochs_from_recording(recording, offset_s, fs=SAMPLING_RATE):
+    """Filters and scales one RawRecording and returns its windows plus per-window metadata."""
+    filtered = preprocess_continuous_eeg(recording.data, fs=fs)
+    scaled = robust_scale_recording(filtered)
+    windows = stimulus_windows(recording.duration_s, offset_s=offset_s)
+    X, meta = [], []
+    for w in windows:
+        a = int(round(w.start_s * fs))
+        b = a + TRIAL_SAMPLES
+        if b > scaled.shape[1]:
             continue
-        parts = line.split('\t')
-        for part in parts:
-            part = part.strip()
-            if ',' in part and not part.startswith('Page'):
-                # Extract comma-separated numeric sequences
-                try:
-                    num_strings = [s.strip() for s in part.split(',') if s.strip()]
-                    if len(num_strings) >= 100:
-                        # Valid channel time series
-                        numeric_vals = [float(v) for v in num_strings if re.match(r'^-?\d+(\.\d+)?$', v)]
-                        if len(numeric_vals) >= 100:
-                            channels_data.append(numeric_vals)
-                except Exception:
-                    continue
+        X.append(scaled[:, a:b])
+        meta.append(w)
+    if not X:
+        return np.empty((0, NUM_CHANNELS, TRIAL_SAMPLES), np.float32), []
+    return np.stack(X).astype(np.float32), meta
 
-    if len(channels_data) < NUM_CHANNELS:
-        return None
 
-    # Align to common sample length
-    selected_channels = channels_data[:NUM_CHANNELS]
-    min_length = min(len(c) for c in selected_channels)
-    
-    matrix = np.array([c[:min_length] for c in selected_channels], dtype=np.float32)
-    return matrix
+def convert_subject(sub_folder, offsets, default_offset, write_csv=False):
+    subject = subject_from_folder(os.path.basename(sub_folder))
+    txt_files = sorted(glob.glob(os.path.join(sub_folder, "*.txt")))
+    X_all, rows = [], []
+    files, file_offsets, durations = [], [], []
 
-def run_conversion():
-    """
-    Scans all subjects in 'Raw data/', cleans signals, extracts epochs,
-    and saves individual CSVs + consolidated NPZ archives.
-    """
-    print("=" * 70)
-    print("Starting Raw EEG Data Conversion & Preprocessing Pipeline")
-    print("=" * 70)
+    for f_idx, path in enumerate(tqdm(txt_files, desc=f"  {subject}", leave=False)):
+        rec = parse_raw_txt_file(path)
+        off = offset_for(subject, rec.file, offsets, default_offset)
+        X, meta = epochs_from_recording(rec, off)
+        bad, reasons = flag_artifacts(X) if len(X) else (np.zeros(0, bool), [])
+        files.append(rec.file)
+        file_offsets.append(off)
+        durations.append(rec.duration_s)
+        X_all.append(X)
+        for i, w in enumerate(meta):
+            rows.append({
+                'subject': subject,
+                'file': rec.file,
+                'file_idx': f_idx,
+                'offset_s': off,
+                'start_s': w.start_s,
+                'kind': w.kind,
+                'block': w.block,
+                'format': w.format,
+                'label_id': w.label,
+                'direction': DIRECTIONS[w.label] if w.label != BLANK_LABEL else 'blank',
+                'bad': bool(bad[i]),
+                'bad_reason': reasons[i],
+            })
 
-    metadata_records = []
-    subject_folders = sorted([
-        d for d in os.listdir(RAW_DATA_DIR)
-        if os.path.isdir(os.path.join(RAW_DATA_DIR, d))
-    ])
+    X = np.concatenate(X_all, axis=0) if X_all else np.empty((0, NUM_CHANNELS, TRIAL_SAMPLES), np.float32)
+    df = pd.DataFrame(rows)
+    npz_path = os.path.join(TENSORS_DIR, subject_npz_name(subject))
+    np.savez_compressed(
+        npz_path,
+        X=X,
+        y=df['label_id'].to_numpy(np.int64),
+        is_stim=(df['kind'] == 'stim').to_numpy(),
+        block=df['block'].to_numpy(np.int16),
+        fmt=df['format'].map({f: i for i, f in enumerate(FORMATS)}).to_numpy(np.int8),
+        file_idx=df['file_idx'].to_numpy(np.int16),
+        start_s=df['start_s'].to_numpy(np.float32),
+        bad=df['bad'].to_numpy(),
+        files=np.array(files),
+        file_offsets_s=np.array(file_offsets, np.float32),
+        file_durations_s=np.array(durations, np.float32),
+        subject=np.array(subject),
+        fs=np.array(SAMPLING_RATE),
+        channels=np.array(CHANNELS),
+    )
 
-    if not subject_folders:
-        print(f"[Error] No subject directories found in {RAW_DATA_DIR}")
-        return
+    if write_csv:
+        for i, r in df.iterrows():
+            name = f"{subject}_{os.path.splitext(r['file'])[0]}_b{r['block']:02d}_{r['start_s']:07.2f}s_{r['direction']}.csv"
+            out = pd.DataFrame(X[i].T, columns=CHANNELS)
+            out.insert(0, 'time_ms', np.arange(TRIAL_SAMPLES) * (1000.0 / SAMPLING_RATE))
+            out.to_csv(os.path.join(CSV_TRIALS_DIR, name), index=False)
+    return df, npz_path
 
-    print(f"Found {len(subject_folders)} subjects: {subject_folders}\n")
 
-    for sub_idx, sub_name in enumerate(subject_folders):
-        sub_path = os.path.join(RAW_DATA_DIR, sub_name)
-        txt_files = sorted(glob.glob(os.path.join(sub_path, "*.txt")))
-        
-        print(f"[{sub_idx + 1}/{len(subject_folders)}] Processing {sub_name} ({len(txt_files)} files)...")
+def run_conversion(write_csv=False, offsets_path=OFFSETS_PATH):
+    print("=" * 70, flush=True)
+    print("Raw EEG conversion: all pages, 256 Hz, stimulus-locked windows", flush=True)
+    print("=" * 70, flush=True)
+    ensure_dirs()
+    # Remove stale outputs so old labels can never mix with new ones
+    for stale in [TENSORS_DIR, CSV_TRIALS_DIR]:
+        if os.path.isdir(stale):
+            shutil.rmtree(stale)
+    os.makedirs(TENSORS_DIR, exist_ok=True)
+    if write_csv:
+        os.makedirs(CSV_TRIALS_DIR, exist_ok=True)
 
-        subject_epochs = []
-        subject_labels = []
+    offsets, default_offset, provenance = load_offsets(offsets_path)
+    print(f"Stimulus offsets: {provenance}", flush=True)
 
-        for f_idx, file_path in enumerate(tqdm(txt_files, desc=f"  Files for {sub_name}")):
-            raw_matrix = parse_raw_txt_file(file_path)
-            if raw_matrix is None:
-                continue
+    sub_folders = sorted(d for d in glob.glob(os.path.join(RAW_DATA_DIR, '*')) if os.path.isdir(d))
+    if not sub_folders:
+        raise FileNotFoundError(f"No subject directories found in {RAW_DATA_DIR}")
 
-            # 1. Filter continuous recording (Bandpass + Notch)
-            filtered_matrix = preprocess_continuous_eeg(
-                raw_matrix,
-                fs=SAMPLING_RATE,
-                lowcut=BANDPASS_LOW,
-                highcut=BANDPASS_HIGH,
-                notch_f=NOTCH_FREQ
-            )
+    frames = []
+    for sub_folder in sub_folders:
+        df, npz_path = convert_subject(sub_folder, offsets, default_offset, write_csv)
+        stim = df[df['kind'] == 'stim']
+        counts = stim['direction'].value_counts().reindex(DIRECTIONS, fill_value=0).tolist()
+        print(f"  {df['subject'].iloc[0]:6s}: {df['file'].nunique():2d} files | {len(stim):4d} stim + "
+              f"{(df['kind'] == 'blank').sum():3d} blank windows | per class L/R/F/B {counts} | "
+              f"flagged bad {df['bad'].mean() * 100:4.1f}% -> {os.path.basename(npz_path)}", flush=True)
+        frames.append(df)
 
-            # 2. Determine class label (cyclical allocation 0:left, 1:right, 2:forward, 3:backward)
-            dir_id = f_idx % len(DIRECTIONS)
-            dir_label = DIRECTIONS[dir_id]
+    meta = pd.concat(frames, ignore_index=True)
+    meta.insert(0, 'epoch_id', np.arange(len(meta)))
+    meta.to_csv(METADATA_PATH, index=False)
+    print(f"Saved {len(meta)} windows; manifest: {METADATA_PATH}", flush=True)
+    return meta
 
-            # 3. Epoch into fixed trial windows (e.g., 2.0s = 500 samples)
-            total_samples = filtered_matrix.shape[1]
-            num_epochs = total_samples // TRIAL_SAMPLES
-
-            for ep_i in range(num_epochs):
-                start_idx = ep_i * TRIAL_SAMPLES
-                end_idx = start_idx + TRIAL_SAMPLES
-                epoch_raw = filtered_matrix[:, start_idx:end_idx]
-
-                # Robust channel-wise standardization
-                epoch_norm = robust_standardize(epoch_raw)
-
-                # 4. Save individual human-readable CSV trial
-                trial_filename = f"{sub_name.replace(' ', '_')}_f{f_idx+1:02d}_ep{ep_i+1:03d}_{dir_label}.csv"
-                csv_path = os.path.join(CSV_TRIALS_DIR, trial_filename)
-
-                df = pd.DataFrame(epoch_norm.T, columns=CHANNELS)
-                df.insert(0, 'time_ms', np.arange(TRIAL_SAMPLES) * (1000.0 / SAMPLING_RATE))
-                df.to_csv(csv_path, index=False)
-
-                subject_epochs.append(epoch_norm)
-                subject_labels.append(dir_id)
-
-                metadata_records.append({
-                    'trial_id': len(metadata_records) + 1,
-                    'trial_filename': trial_filename,
-                    'subject': sub_name,
-                    'source_file': os.path.basename(file_path),
-                    'epoch_index': ep_i,
-                    'direction': dir_label,
-                    'label_id': dir_id,
-                    'channels': NUM_CHANNELS,
-                    'samples': TRIAL_SAMPLES,
-                    'duration_sec': TRIAL_SAMPLES / SAMPLING_RATE
-                })
-
-        # Save Subject Consolidated Tensor Archive (.npz)
-        if subject_epochs:
-            clean_sub_name = re.sub(r'[^a-zA-Z0-9_]', '_', sub_name).lower()
-            npz_path = os.path.join(TENSORS_DIR, f"{clean_sub_name}.npz")
-            X_tensor = np.stack(subject_epochs).astype(np.float32) # [N, 18, 500]
-            y_tensor = np.array(subject_labels, dtype=np.int64)    # [N]
-            
-            np.savez_compressed(npz_path, X=X_tensor, y=y_tensor)
-            print(f"  --> Saved {len(subject_epochs)} epoched trials to {npz_path}\n")
-
-    # Save Master Metadata Manifest
-    if metadata_records:
-        meta_df = pd.DataFrame(metadata_records)
-        meta_df.to_csv(METADATA_PATH, index=False)
-        print("=" * 70)
-        print(f"SUCCESS: Generated {len(metadata_records)} total trials across all subjects.")
-        print(f"Master metadata saved to: {METADATA_PATH}")
-        print("=" * 70)
 
 if __name__ == "__main__":
-    run_conversion()
+    parser = argparse.ArgumentParser(description="Convert raw EEG exports to stimulus-locked epochs")
+    parser.add_argument("--csv", action="store_true", help="Also write one CSV per window (slow, large)")
+    parser.add_argument("--offsets", default=OFFSETS_PATH, help="Path to stimulus_offsets.json")
+    args = parser.parse_args()
+    run_conversion(write_csv=args.csv, offsets_path=args.offsets)

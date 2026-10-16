@@ -4,6 +4,25 @@
 **Target Application:** Brain-Computer Interface (BCI) Navigation, Neuro-prosthetics, and Spatial Teleoperation  
 **Repository Structure:** Multi-subject bipolar EEG records (`Subject 3`, `Subject Gope`, `Subject Supra`) & Stimuli paradigm (`WhatsApp Video 2026-10-09...mp4`).
 
+
+> **Implementation status and corrections (2026-10-10).** This document is a research plan. Several of the
+> methods it describes are not implemented, and some facts about the data were wrong. Read
+> [CRITICAL_REVIEW.md](../CRITICAL_REVIEW.md) and [WORKLOG.md](../WORKLOG.md) first.
+>
+> | Claim in this document | Status |
+> |---|---|
+> | Sampling rate 250 Hz, epochs of 500 samples | **Wrong.** The data is 256 Hz; epochs are 512 samples (2.0 s). Fixed below and in `src/config.py`. |
+> | Epochs sliced "[0.0 s, 2.0 s] post stimulus onset" | Now implemented: 2 s windows from 0.5 s after each block onset, 1 s stride, using the video timeline in `src/stimulus.py`. Each file's onset offset is **unverified** (`stimulus_offsets.json`). |
+> | Labels per file | **Wrong.** Every recording contains all four directions, three times each (arrow, letter, word blocks). Labels now come from the stimulus timeline. |
+> | Per-epoch robust z-scoring | Replaced by per-recording robust scaling + optional Euclidean alignment. |
+> | Artifact attenuation (FastICA / ASR) | Not implemented. Only amplitude/flat-channel flagging (`preprocessing.flag_artifacts`). |
+> | Riemannian tangent-space / MDM few-shot | Implemented as **baselines** in `src/baselines.py` (pyriemann), not as part of the deep model. |
+> | Spatial-Temporal *Attention Conformer* (§4.3) | Not implemented. `src/models.py` has an EEGNet-style multi-scale CNN (7,280 parameters) and EEGNet. No attention. |
+> | MAML / Reptile, self-supervised pre-training (§4.3–4.4) | Not implemented. |
+> | Directional angular loss | Implemented, **off by default**, untested inductive bias. |
+> | LOSO on K = 1, 3, 5 | Implemented with K = 1, 3, 5, 10, calibration on one recording and testing on the others, CIs, permutation tests and a shuffled-label control. |
+> | Results | **The recordings do not look like EEG** (flat spectrum, Gaussian, no blinks, no response time-locked to the stimulus; see `results/sanity_report.md`). Every model and baseline is at chance. |
+
 ---
 
 ## Table of Contents
@@ -85,9 +104,9 @@ flowchart TD
     C --> D["Bandpass Filter (0.5 - 45.0 Hz, 4th Order Butterworth)"]
     D --> E["Notch Filter (50 Hz / 60 Hz Powerline Suppression)"]
     E --> F["Artifact Attenuation (FastICA / Riemannian ASR)"]
-    F --> G["Stimulus-Triggered Epoch Slicing [0.0s, 2.0s]"]
-    G --> H["Robust Z-Score Normalization per Epoch"]
-    H --> I["Epoched Tensor Dataset: (N_trials, C=18, T=500)"]
+    F --> G["Stimulus-Locked Windows [onset+0.5 s, onset+2.5 s], 1 s stride"]
+    G --> H["Robust Scaling per Recording (+ Euclidean Alignment)"]
+    H --> I["Epoched Tensor Dataset: (N_trials, C=18, T=512)"]
 ```
 
 ### 3.1 Mathematical Definitions
@@ -143,7 +162,7 @@ For geometric covariance modeling on the manifold of Symmetric Positive Definite
 ### 4.3 Model Architecture: Spatial-Temporal Attention Conformer
 
 ```
-Input Trial: [Batch, 1, Channels=18, Time=500]
+Input Trial: [Batch, 1, Channels=18, Time=512]
          │
          ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -246,7 +265,7 @@ from torch.utils.data import Dataset, DataLoader
 from scipy.signal import butter, filtfilt
 
 # Bandpass Butterworth Filter
-def butter_bandpass_filter(data, lowcut=0.5, highcut=45.0, fs=250.0, order=4):
+def butter_bandpass_filter(data, lowcut=0.5, highcut=45.0, fs=256.0, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
     high = highcut / nyq

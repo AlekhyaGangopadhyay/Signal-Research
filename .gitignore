@@ -5,14 +5,22 @@ __pycache__/
 *.pt
 *.pth
 *.pkl
+.pytest_cache/
 
 # Environments
 .env
+.venv/
 venv/
 env/
 ENV/
 
+# Generated outputs (rebuild with `python run_pipeline.py --convert`)
+processed_data/
+checkpoints/
+results/*
+!results/.gitkeep
+*.log
+
 # OS Specific
 .DS_Store
 Thumbs.db
-*.log

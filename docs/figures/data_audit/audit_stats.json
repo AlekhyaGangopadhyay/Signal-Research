@@ -1,0 +1,92 @@
+{
+  "yours_median": {
+    "Spectral slope 2-40 Hz": -0.10648928814929697,
+    "Slow/fast power (1-4 Hz vs 13-30 Hz)": 1.193106918339622,
+    "Occipital alpha peak (x background)": 1.2067047458827191,
+    "Sample-to-sample smoothness (lag-1 r)": 0.838649519226967,
+    "Spikiness (excess kurtosis, frontal)": 0.005977199541084888,
+    "Amplitude change over time (CV of 2 s SD)": 0.05892471591813238,
+    "Neighbouring-channel correlation": -0.4943397829024033,
+    "Distinct values per channel": 25.0
+  },
+  "yours_min": {
+    "Spectral slope 2-40 Hz": -0.26645339260423334,
+    "Slow/fast power (1-4 Hz vs 13-30 Hz)": 1.0480877080384032,
+    "Occipital alpha peak (x background)": 1.1081716959591237,
+    "Sample-to-sample smoothness (lag-1 r)": 0.8330042592983784,
+    "Spikiness (excess kurtosis, frontal)": -0.07812227818321005,
+    "Amplitude change over time (CV of 2 s SD)": 0.055261295062539684,
+    "Neighbouring-channel correlation": -0.5748071295317322,
+    "Distinct values per channel": 22.0
+  },
+  "yours_max": {
+    "Spectral slope 2-40 Hz": -0.026389471596860056,
+    "Slow/fast power (1-4 Hz vs 13-30 Hz)": 1.2751422494680058,
+    "Occipital alpha peak (x background)": 2.2085497549999733,
+    "Sample-to-sample smoothness (lag-1 r)": 0.8552139876860914,
+    "Spikiness (excess kurtosis, frontal)": 1.8245197697655016,
+    "Amplitude change over time (CV of 2 s SD)": 0.13588628425015634,
+    "Neighbouring-channel correlation": -0.4517963431476489,
+    "Distinct values per channel": 33.0
+  },
+  "ref_eyes_open": {
+    "Spectral slope 2-40 Hz": -1.1728305848707619,
+    "Slow/fast power (1-4 Hz vs 13-30 Hz)": 33.33714521124594,
+    "Occipital alpha peak (x background)": 2.8682074783076903,
+    "Sample-to-sample smoothness (lag-1 r)": 0.9573878925142683,
+    "Spikiness (excess kurtosis, frontal)": 16.156372291306077,
+    "Amplitude change over time (CV of 2 s SD)": 0.2763605119335089,
+    "Neighbouring-channel correlation": 0.32825781784655,
+    "Distinct values per channel": 15616.0
+  },
+  "ref_eyes_closed": {
+    "Spectral slope 2-40 Hz": -1.150307124800124,
+    "Slow/fast power (1-4 Hz vs 13-30 Hz)": 9.423141339261273,
+    "Occipital alpha peak (x background)": 38.66539875119009,
+    "Sample-to-sample smoothness (lag-1 r)": 0.9573967687154408,
+    "Spikiness (excess kurtosis, frontal)": 0.6152440067826617,
+    "Amplitude change over time (CV of 2 s SD)": 0.14781514332008006,
+    "Neighbouring-channel correlation": 0.3476822842419108,
+    "Distinct values per channel": 15616.0
+  },
+  "dc_offset_spread_across_files": {
+    "FP2_F8": 6.502561569213867,
+    "F8_T4": 15.017891883850098,
+    "T4_T6": 3.37855863571167,
+    "T6_O2": 4.735628128051758,
+    "FP2_F4": 17.535917282104492,
+    "F4_C4": 12.372852325439453,
+    "C4_P4": 4.687824726104736,
+    "P4_O2": 6.026346206665039,
+    "FP1_F7": 1.846939206123352,
+    "F7_T3": 7.397346019744873,
+    "T3_T5": 1.8402142524719238,
+    "T5_O1": 10.489877700805664,
+    "FP1_F3": 6.966347694396973,
+    "F3_C3": 13.377159118652344,
+    "C3_P3": 5.117703914642334,
+    "P3_O1": 22.193817138671875,
+    "FZ_CZ": 6.606418609619141,
+    "CZ_PZ": 10.222309112548828
+  },
+  "dc_offset_mean": {
+    "FP2_F8": 17.555686950683594,
+    "F8_T4": -41.37115478515625,
+    "T4_T6": -189.31211853027344,
+    "T6_O2": -241.52561950683594,
+    "FP2_F4": 262.07421875,
+    "F4_C4": -1092.0350341796875,
+    "C4_P4": 684.1678466796875,
+    "P4_O2": -308.8602294921875,
+    "FP1_F7": 2034.0526123046875,
+    "F7_T3": -592.6913452148438,
+    "T3_T5": 400.8421936035156,
+    "T5_O1": -207.75498962402344,
+    "FP1_F3": 1223.5504150390625,
+    "F3_C3": -386.3504943847656,
+    "C3_P3": 709.4044799804688,
+    "P3_O1": 87.84418487548828,
+    "FZ_CZ": -129.1366424560547,
+    "CZ_PZ": 423.7696533203125
+  }
+}

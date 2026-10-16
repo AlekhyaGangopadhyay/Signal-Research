@@ -1,337 +1,126 @@
-# End-to-End Operational Guide: Data Conversion, Preprocessing & Few-Shot Model Execution
+# Data Conversion and Execution Guide
 
-**Project:** Few-Shot EEG Direction Detection (`Left`, `Right`, `Forward`, `Backward`)  
-**Purpose:** A step-by-step practical manual covering exactly what to do from raw data ingestion to model deployment and evaluation.
+How raw recordings become labelled epochs, how to check the data is valid, and how to run the models.
+Updated 2026-10-10 to match the code. The history of the changes is in [WORKLOG.md](../WORKLOG.md).
 
----
-
-## Table of Contents
-1. [Overall Workflow Roadmap](#1-overall-workflow-roadmap)
-2. [Phase 1: Label Mapping & Data Organization](#2-phase-1-label-mapping--data-organization)
-3. [Phase 2: Raw Text to CSV / NPZ Conversion Guide](#3-phase-2-raw-text-to-csv--npz-conversion-guide)
-4. [Phase 3: Signal Preprocessing Pipeline](#4-phase-3-signal-preprocessing-pipeline)
-5. [Phase 4: Folder Architecture & Data Storage](#5-phase-4-folder-architecture--data-storage)
-6. [Phase 5: PyTorch Model Training & Evaluation](#6-phase-5-pytorch-model-training--evaluation)
-7. [Phase 6: Quality Assurance & Troubleshooting](#7-phase-6-quality-assurance--troubleshooting)
-8. [Ready-to-Run Automation Scripts](#8-ready-to-run-automation-scripts)
+> **Read first.** The current recordings fail every data-validity check (`python -m src.sanity`). They have a
+> flat spectrum, Gaussian amplitudes, no blinks and no response time-locked to the stimulus. Decoding results on them
+> are at chance and should not be reported as findings. Section 6 lists what is needed from the recording side.
 
 ---
 
-## 1. Overall Workflow Roadmap
+## 1. Workflow
 
 ```mermaid
 flowchart TD
-    A["Raw .txt Files (Pages 1..N)"] --> B["Step 1: Parse & Assign Direction Labels (Left, Right, Fwd, Bwd)"]
-    B --> C["Step 2: Convert to Structured CSVs + NumPy/PyTorch Archives (.npz)"]
-    C --> D["Step 3: Apply Bandpass (0.5-45 Hz) & Notch Filtering (50 Hz)"]
-    D --> E["Step 4: Segment into 2.0s Epoched Tensors (N_trials, 18, 500)"]
-    E --> F["Step 5: Setup Few-Shot Episodic Loader (4-way K-shot)"]
-    F --> G["Step 6: Train Prototypical Spatial-Temporal Network"]
-    G --> H["Step 7: Evaluate on Unseen Subjects (LOSO-CV: Acc, Kappa, ITR)"]
+    A["Raw .txt exports (all pages)"] --> B["src/raw_io.py: parse, check channel names, join pages (256 Hz)"]
+    B --> S["src/sanity.py: is it EEG? any block-locked response? (run this first)"]
+    B --> C["src/preprocessing.py: DC removal, 0.5-45 Hz band-pass, 50 Hz notch on the whole recording, robust scaling"]
+    C --> D["src/stimulus.py + stimulus_offsets.json: windows locked to the 12 video blocks"]
+    D --> E["processed_data/tensors/subject_*.npz + metadata.csv"]
+    E --> F["src/baselines.py: band power, CSP, Riemannian baselines"]
+    E --> G["src/evaluate.py: LOSO few-shot ProtoNet with controls"]
 ```
 
----
+## 2. Raw file format
 
-## 2. Phase 1: Label Mapping & Data Organization
-
-### 2.1 The Labeling Problem
-The raw data files (`AllPages_1.txt`, `AllPages_2.txt`, etc.) store continuous EEG pages with tab-separated channel dumps, but the files themselves do not contain machine-readable direction tags.
-
-### 2.2 Direction Class Definitions
-All directional classes must be mapped to integer IDs for PyTorch training:
-
-| Class ID | Direction | Semantic Meaning | Stimulus Cue Angle |
-| :---: | :---: | :---: | :---: |
-| `0` | **Left** | Visual motion / Arrow pointing Left | $180^\circ$ |
-| `1` | **Right** | Visual motion / Arrow pointing Right | $0^\circ$ |
-| `2` | **Forward** (Up) | Visual motion / Arrow pointing Forward/Up | $90^\circ$ |
-| `3` | **Backward** (Down) | Visual motion / Arrow pointing Backward/Down | $270^\circ$ |
-
----
-
-## 3. Phase 2: Raw Text to CSV / NPZ Conversion Guide
-
-### 3.1 Why Convert Both to CSV and `.npz`?
-- **Individual `.csv` files**: For manual inspection, plotting in Excel, MNE, or MATLAB.
-- **Combined `.npz` archives**: For high-speed PyTorch GPU data loading ($>50\times$ faster than reading text files).
-
-### 3.2 Standard CSV Format Specification
-Each generated CSV file will represent **one single stimulus trial** of duration $T = 2.0\text{s}$ ($500$ sample rows at $250\text{ Hz}$):
-
-- **File Naming Convention**:  
-  `data/processed_csv/sub_{subject_id}_trial_{trial_num}_{direction}.csv`  
-  *Example:* `sub_03_trial_001_left.csv`
-
-- **CSV Column Header (18 Bipolar Channels + Time)**:
-```csv
-time_ms,FP2_F8,F8_T4,T4_T6,T6_O2,FP2_F4,F4_C4,C4_P4,P4_O2,FP1_F7,F7_T3,T3_T5,T5_O1,FP1_F3,F3_C3,C3_P3,P3_O1,FZ_CZ,CZ_PZ
-0,21.0,-50.0,-188.0,-245.0,245.0,12.0,...
-4,23.0,-52.0,-185.0,-244.0,244.0,14.0,...
-...
-```
-
-### 3.3 Metadata Manifest (`metadata.csv`)
-A centralized master index linking all generated CSV files:
-```csv
-trial_id,subject_id,source_file,page_num,direction,label_id,sample_count,sampling_rate_hz
-0001,Subject 3,AllPages_1.txt,Page-1,left,0,500,250
-0002,Subject 3,AllPages_1.txt,Page-2,left,0,500,250
-0003,Subject 3,AllPages_2.txt,Page-1,right,1,500,250
-```
-
----
-
-## 4. Phase 3: Signal Preprocessing Pipeline
-
-Every raw EEG trial must pass through standard signal filtering:
+Each `.txt` file is one recording, which is one viewing of the stimulus video. It is a single line of tab-separated tokens:
 
 ```
-[Raw Voltage Signal] 
-       │
-       ▼
-1. Zero-Phase 4th Order Butterworth Bandpass Filter (0.5 Hz - 45.0 Hz)
-   - Removes DC offset / slow baseline drift (< 0.5 Hz)
-   - Eliminates high-frequency muscle / EMG noise (> 45 Hz)
-       │
-       ▼
-2. Notch Filter (50.0 Hz with Q=30)
-   - Suppresses AC powerline electrical hum
-       │
-       ▼
-3. Trial Segmentation / Windowing
-   - Slice exactly [0.0s, 2.0s] post stimulus onset
-       │
-       ▼
-4. Robust Standardization (Per Channel)
-   - x_clean = (x - median(x)) / (IQR(x) + 1e-6)
-       │
-       ▼
-[Output Tensor: Shape (18, 500)]
+Page-1  FP2- F8  v,v,v,...,  F8 - T4  v,v,v,...,  ...  BP1- REF  v,...,  BP2- REF  v,...,  Page-2 ...
 ```
 
----
+- Each page holds 20 named series of **2560 samples = 10.0 s at 256 Hz**. Each series ends with a trailing comma.
+- The 18 EEG channels are a longitudinal bipolar ("double banana") montage. `BP1-REF` and `BP2-REF` are constant auxiliary inputs and are dropped.
+- Pages are consecutive in time and are concatenated. Recordings last 170–220 s.
+- The parser raises `RawFormatError` on any structural problem. It never skips values silently.
 
-## 5. Phase 4: Folder Architecture & Data Storage
+## 3. Labels: the stimulus timeline
 
-After running the conversion scripts, your project directory will be organized as follows:
+The files have no event markers. Labels come from the video in `Stimuli/`. Its timeline was verified frame by frame:
+
+| Video time | Content |
+|---|---|
+| 0.5–1.5 s | title card |
+| 4.2 + 15·i s (i = 0..11), 9.2 s each | stimulus blocks |
+| 5.8 s between blocks | blank white screen |
+
+| Blocks 1–4 | Blocks 5–8 | Blocks 9–12 |
+|---|---|---|
+| ← → ↑ ↓ (arrows) | L R F B (letters) | LEFT RIGHT FORWARD BACKWARD (words) |
+
+Class ids: `0 left`, `1 right`, `2 forward`, `3 backward`.
+
+**Offsets.** `stimulus_offsets.json` gives, for each file, the recording time at which the video started:
+recording time = video time + offset. All offsets are currently **0.0 and unverified**. A 170 s recording cannot hold the whole 180 s video, so they are wrong for at least some files. Enter measured offsets there, then rerun the conversion.
+
+**Windows.** Each stimulus block gives 7 windows of 2.0 s (512 samples), starting at onset + 0.5 s with a 1 s stride. Each blank gap gives 2 windows labelled `-1`. These are used only by the sanity checks.
+
+## 4. Preprocessing
+
+Applied to each **whole recording** before epoching, so filter edge effects stay at the recording ends:
+
+1. Remove each channel's DC offset.
+2. 4th-order Butterworth band-pass, 0.5–45 Hz, zero-phase second-order sections.
+3. 50 Hz notch (Q = 30).
+4. Robust scaling per channel, using the recording's median and IQR.
+5. Artifact flags: any channel > 12 robust units, or a flat channel. Flagged windows are kept in the NPZ with `bad=True` and skipped by the dataset.
+6. Optional at load time: Euclidean alignment per recording (`EEGSubjectDataset(..., alignment='euclidean')`).
+
+For real-time use, `CausalPreprocessor` applies the same filters causally (no look-ahead).
+
+## 5. Outputs
 
 ```
-e:\EEG-direction-detection\
-├── Documenations\
-│   ├── RESEARCH_DOCUMENTATION.md          <- Research theoretical plan
-│   └── DATA_CONVERSION_AND_EXECUTION_GUIDE.md <- This operational guide
-├── Raw data\                              <- Original recorded data (DO NOT MODIFY)
-│   ├── Raw data(Subject 3)\
-│   ├── Raw data(Subject Gope)\
-│   └── Raw data(Subject Supra)\
-├── Stimuli\
-│   └── WhatsApp Video 2026-10-09...mp4
-├── processed_data\                        <- Generated structured dataset
-│   ├── metadata.csv                       <- Master manifest of all trials
-│   ├── csv_trials\                        <- Human-readable CSV per trial
-│   │   ├── sub_03_trial_001_left.csv
-│   │   ├── sub_03_trial_002_right.csv
-│   │   └── ...
-│   └── tensors\                           <- Fast PyTorch binary arrays
-│       ├── subject_3.npz                  <- X: [N, 18, 500], y: [N]
-│       ├── subject_gope.npz
-│       └── subject_supra.npz
-├── src\                                   <- Source code
-│   ├── convert_raw_data.py                <- ETL & CSV/NPZ converter
-│   ├── dataset.py                         <- Few-shot episodic PyTorch loader
-│   ├── models.py                          <- Spatial-Temporal ProtoNet
-│   ├── train_fewshot.py                   <- Meta-learning training loop
-│   └── evaluate.py                        <- Cross-subject LOSO testing
-└── requirements.txt                       <- Python dependencies
+processed_data/
+├── metadata.csv          one row per window: subject, file, offset_s, start_s, kind, block, format, label, bad
+├── tensors/
+│   ├── subject_3.npz     X [N,18,512], y, is_stim, block, fmt, file_idx, start_s, bad,
+│   ├── subject_gope.npz  files, file_offsets_s, file_durations_s, subject, fs, channels
+│   └── subject_supra.npz
+└── csv_trials/           only with --csv
 ```
 
----
+`processed_data/`, `checkpoints/` and `results/` are generated and not tracked by git.
 
-## 6. Phase 5: PyTorch Model Training & Evaluation
+## 6. Commands
 
-### 6.1 Few-Shot Meta-Learning Setup
-- **$N$-Way**: 4 classes (`Left`, `Right`, `Forward`, `Backward`).
-- **$K$-Shot Support**: 1 to 5 trials per class for target calibration.
-- **$Q$-Query**: 5 to 10 trials per class to test adaptation.
-- **Cross-Validation**: Leave-One-Subject-Out (LOSO) across `Subject 3`, `Subject Gope`, `Subject Supra`.
-
-### 6.2 Execution Commands
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+python -m venv .venv && .venv/Scripts/pip install -r requirements.txt   # Python >= 3.10
 
-# 2. Convert raw data to clean CSVs and NPZ tensors
-python src/convert_raw_data.py
-
-# 3. Run Few-Shot Meta-Learning Training with LOSO Cross-Validation
-python src/train_fewshot.py --k_shot 5 --n_epochs 100 --lr 0.001
-
-# 4. Generate Performance Plots (Confusion Matrix, Few-shot Curve)
-python src/evaluate.py
+python -m src.sanity                       # data-validity checks  -> results/sanity_report.md
+python -m src.convert_raw_data [--csv]     # raw -> NPZ            -> processed_data/
+python -m src.baselines                    # classical baselines   -> results/baselines.md
+python -m src.evaluate --shots 1 3 5 10    # LOSO few-shot ProtoNet -> results/loso_*.md, plots, checkpoints/
+python -m src.train_fewshot                # train on all subjects -> checkpoints/protonet_spatial_temporal.pth
+python run_pipeline.py                     # all of the above in order
+python -m pytest tests                     # 37 tests
 ```
 
----
+## 7. Evaluation rules
 
-## 7. Phase 6: Quality Assurance & Troubleshooting
+- Never sample with replacement. Support and query windows always come from different stimulus blocks.
+- Few-shot evaluation: each target recording takes a turn as the calibration session (K windows per class), and every window of the target's *other* recordings is tested.
+- Every accuracy is reported with a 95% CI from resampling whole blocks, and a block-label permutation p-value.
+- Every LOSO fold also trains a shuffled-label control model. A result only counts if it beats chance **and** the control.
+- Classical baselines are always run next to the deep model.
 
-| Potential Issue | Root Cause | Solution |
-| :--- | :--- | :--- |
-| **Channel count mismatch** | Some pages have fewer lines/channels. | The parser auto-selects the first 18 valid bipolar channels. |
-| **High 50 Hz powerline hum** | Ungrounded electrode contact. | Ensure the $50\text{ Hz}$ Notch filter is active in the preprocessing step. |
-| **Few-shot overfitting** | Model memorizes base subjects. | Use Spatial Dropout ($p=0.25$) and L2 unit sphere normalization on latent embeddings. |
-| **Slow training loop** | Loading raw text files inside `__getitem__`. | Always load from the pre-computed `.npz` tensor files. |
+## 8. What the data needs before decoding can work
 
----
+These can't be fixed in code:
 
-## 8. Ready-to-Run Automation Scripts
+1. **Confirm the export.** Check the gain, units and channel selection in the acquisition software. Each channel has only ~24 distinct values and no 1/f spectrum, which looks like amplifier noise or a wrong export. Re-export in µV at full resolution.
+2. **Record a known effect first.** One minute eyes open vs eyes closed should give strong occipital alpha. If `python -m src.sanity` can't see it, the setup is not recording EEG.
+3. **Synchronise.** Use a photodiode on a screen corner, or an event marker sent to the amplifier at each block onset. Or at least note when the video was started relative to the recording, for every file.
+4. **Use the original stimulus file** instead of the WhatsApp re-encode, which has a variable frame rate.
+5. **More subjects.** LOSO with 3 subjects trains each model on 2.
 
-### Script 1: `requirements.txt`
-```text
-torch>=2.0.0
-numpy>=1.23.0
-scipy>=1.10.0
-pandas>=2.0.0
-scikit-learn>=1.2.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
-tqdm>=4.65.0
-```
+## 9. Troubleshooting
 
-### Script 2: `src/convert_raw_data.py`
-```python
-"""
-Automatic ETL: Converts Raw Bipolar EEG text files into structured CSVs and NPZ archives.
-"""
-
-import os
-import glob
-import numpy as np
-import pandas as pd
-from scipy.signal import butter, filtfilt, iirnotch
-
-CHANNELS = [
-    'FP2_F8', 'F8_T4', 'T4_T6', 'T6_O2',
-    'FP2_F4', 'F4_C4', 'C4_P4', 'P4_O2',
-    'FP1_F7', 'F7_T3', 'T3_T5', 'T5_O1',
-    'FP1_F3', 'F3_C3', 'C3_P3', 'P3_O1',
-    'FZ_CZ', 'CZ_PZ'
-]
-
-SAMPLING_RATE = 250 # Hz
-TRIAL_SAMPLES = 500 # 2.0 seconds
-
-def apply_filters(data, fs=250.0):
-    # 1. Bandpass 0.5 - 45 Hz
-    nyq = 0.5 * fs
-    b_band, a_band = butter(4, [0.5 / nyq, 45.0 / nyq], btype='band')
-    filtered = filtfilt(b_band, a_band, data, axis=-1)
-    
-    # 2. Notch 50 Hz
-    b_notch, a_notch = iirnotch(50.0, 30.0, fs)
-    filtered = filtfilt(b_notch, a_notch, filtered, axis=-1)
-    return filtered
-
-def parse_file(file_path):
-    channels_data = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split('\t')
-            for p in parts:
-                p = p.strip()
-                if ',' in p and not p.startswith('Page'):
-                    try:
-                        vals = [float(x.strip()) for x in p.split(',') if x.strip()]
-                        if len(vals) > 100:
-                            channels_data.append(vals)
-                    except ValueError:
-                        continue
-    if len(channels_data) < 18:
-        return None
-    min_len = min(len(c) for c in channels_data[:18])
-    return np.array([c[:min_len] for c in channels_data[:18]], dtype=np.float32)
-
-def main():
-    raw_root = "Raw data"
-    output_csv_dir = os.path.join("processed_data", "csv_trials")
-    output_tensor_dir = os.path.join("processed_data", "tensors")
-    os.makedirs(output_csv_dir, exist_ok=True)
-    os.makedirs(output_tensor_dir, exist_ok=True)
-
-    metadata_records = []
-    directions = ['left', 'right', 'forward', 'backward']
-
-    subject_folders = [d for d in os.listdir(raw_root) if os.path.isdir(os.path.join(raw_root, d))]
-    
-    for sub_idx, sub_folder in enumerate(subject_folders):
-        sub_path = os.path.join(raw_root, sub_folder)
-        txt_files = sorted(glob.glob(os.path.join(sub_path, "*.txt")))
-        
-        subject_tensors = []
-        subject_labels = []
-
-        print(f"Processing {sub_folder} ({len(txt_files)} files)...")
-
-        for f_idx, file_path in enumerate(txt_files):
-            data = parse_file(file_path)
-            if data is None:
-                continue
-            
-            # Filter signal
-            data_filtered = apply_filters(data)
-
-            # Assign direction cyclically or by mapping
-            dir_label = directions[f_idx % 4]
-            dir_id = f_idx % 4
-
-            # Slice into 2.0s epochs (500 samples)
-            total_samples = data_filtered.shape[1]
-            num_epochs = total_samples // TRIAL_SAMPLES
-
-            for epoch_i in range(num_epochs):
-                start = epoch_i * TRIAL_SAMPLES
-                end = start + TRIAL_SAMPLES
-                epoch_data = data_filtered[:, start:end]
-
-                # Standardize
-                median = np.median(epoch_data, axis=-1, keepdims=True)
-                iqr = np.percentile(epoch_data, 75, axis=-1, keepdims=True) - np.percentile(epoch_data, 25, axis=-1, keepdims=True)
-                epoch_norm = (epoch_data - median) / (iqr + 1e-6)
-
-                # Save individual CSV
-                trial_name = f"sub{sub_idx+1:02d}_file{f_idx+1:02d}_ep{epoch_i+1:03d}_{dir_label}.csv"
-                csv_path = os.path.join(output_csv_dir, trial_name)
-
-                df = pd.DataFrame(epoch_norm.T, columns=CHANNELS)
-                df.insert(0, 'time_ms', np.arange(TRIAL_SAMPLES) * (1000.0 / SAMPLING_RATE))
-                df.to_csv(csv_path, index=False)
-
-                subject_tensors.append(epoch_norm)
-                subject_labels.append(dir_id)
-
-                metadata_records.append({
-                    'trial_name': trial_name,
-                    'subject': sub_folder,
-                    'source_file': os.path.basename(file_path),
-                    'epoch_idx': epoch_i,
-                    'direction': dir_label,
-                    'label_id': dir_id,
-                    'samples': TRIAL_SAMPLES,
-                    'sampling_rate': SAMPLING_RATE
-                })
-
-        if subject_tensors:
-            npz_path = os.path.join(output_tensor_dir, f"subject_{sub_idx+1}.npz")
-            np.savez_compressed(npz_path, X=np.stack(subject_tensors), y=np.array(subject_labels))
-            print(f"Saved {len(subject_tensors)} epochs to {npz_path}")
-
-    # Save metadata master index
-    meta_df = pd.DataFrame(metadata_records)
-    meta_df.to_csv(os.path.join("processed_data", "metadata.csv"), index=False)
-    print("Conversion complete! Metadata saved to processed_data/metadata.csv")
-
-if __name__ == "__main__":
-    main()
-```
+| Symptom | Cause / fix |
+|---|---|
+| `RawFormatError: channels [...] != expected` | Different montage or channel order in the export. Update `CHANNELS` in `src/config.py` only if the montage really differs. |
+| `RawFormatError: non-numeric sample` | Corrupt export. Re-export the file. Values are never silently dropped. |
+| `No subject_*.npz files` | Run `python -m src.convert_raw_data`. |
+| Few windows for one class | Recordings shorter than 180 s cut off the last blocks (backward), or offsets push blocks outside the recording. |
+| All accuracies ≈ 25% with p > 0.05 | Expected with the current data. Check `results/sanity_report.md`. |

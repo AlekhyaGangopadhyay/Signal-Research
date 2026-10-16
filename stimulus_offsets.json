@@ -1,0 +1,29 @@
+{
+  "default_offset_s": 0.0,
+  "provenance": "ASSUMED, NOT VERIFIED: recording sample 0 = video t=0. Replace with measured offsets (trigger/photodiode) or with offsets estimated by python -m src.sanity --estimate-offsets once a stimulus response is detectable.",
+  "offsets_s": {
+    "3/AllPages_1.txt": 0.0,
+    "3/AllPages_10.txt": 0.0,
+    "3/AllPages_11.txt": 0.0,
+    "3/AllPages_2.txt": 0.0,
+    "3/AllPages_3.txt": 0.0,
+    "3/AllPages_4.txt": 0.0,
+    "3/AllPages_5.txt": 0.0,
+    "3/AllPages_6.txt": 0.0,
+    "3/AllPages_7.txt": 0.0,
+    "3/AllPages_8.txt": 0.0,
+    "3/AllPages_9.txt": 0.0,
+    "3/AllPages_TEST.txt": 0.0,
+    "Gope/AllPages_10.txt": 0.0,
+    "Gope/AllPages_11.txt": 0.0,
+    "Gope/AllPages_7.txt": 0.0,
+    "Gope/AllPages_8.txt": 0.0,
+    "Gope/AllPages_9.txt": 0.0,
+    "Supra/AllPages.txt": 0.0,
+    "Supra/AllPages_12.txt": 0.0,
+    "Supra/AllPages_13.txt": 0.0,
+    "Supra/AllPages_14.txt": 0.0,
+    "Supra/AllPages_15.txt": 0.0,
+    "Supra/AllPages_16.txt": 0.0
+  }
+}

@@ -6,11 +6,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def compute_prototypes(z_support, support_y, n_way):
+    """Class means of support embeddings, using the labels (no assumption about ordering)."""
+    return torch.stack([z_support[support_y == c].mean(dim=0) for c in range(n_way)])
+
+
 class PrototypicalLoss(nn.Module):
     """
-    Computes Prototypical Loss based on Euclidean distance to class prototypes.
+    Computes Prototypical Loss based on squared Euclidean distance to class prototypes.
+    With L2-normalised embeddings squared distances lie in [0, 4], so temperature ~1 keeps the
+    softmax out of saturation (0.1 gave logits up to 40).
     """
-    def __init__(self, temperature=0.1):
+    def __init__(self, temperature=1.0):
         super().__init__()
         self.temperature = temperature
 
@@ -20,23 +28,23 @@ class PrototypicalLoss(nn.Module):
         prototypes: [N_way, Latent_Dim]
         query_y: [N_query] (integer class indices from 0 to N_way-1)
         """
-        # Compute squared Euclidean distance between every query and prototype
-        # dists[i, k] = || z_query[i] - prototypes[k] ||^2
         dists = torch.cdist(z_query, prototypes, p=2) ** 2
         logits = -dists / self.temperature
         loss = F.cross_entropy(logits, query_y)
-        
+
         preds = torch.argmax(logits, dim=-1)
         acc = (preds == query_y).float().mean()
         return loss, acc, logits
 
+
 class DirectionalAngularMarginLoss(nn.Module):
     """
-    Novel Directional Angular Loss:
-    Enforces geometric orthogonality among orthogonal directions in latent space:
-    - Left (0) and Forward (2) are orthogonal -> cosine sim = 0
-    - Right (1) and Forward (2) are orthogonal -> cosine sim = 0
-    - Left (0) and Right (1) are opposite -> cosine sim = -1 (or near -0.8)
+    Directional angular regulariser on the class prototypes. Target cosine similarities follow the
+    2-D compass angles (Right 0°, Forward 90°, Left 180°, Backward 270°): cos(θ_i - θ_j), so
+      Left/Right and Forward/Backward are opposite (-1), every other pair is orthogonal (0).
+
+    This is an untested inductive bias (nothing shows the brain codes arrows/letters/words this way).
+    It is off by default (config.USE_ANGULAR_LOSS) and must be justified by an ablation.
     """
     def __init__(self, lambda_angular=0.1):
         super().__init__()
@@ -49,21 +57,14 @@ class DirectionalAngularMarginLoss(nn.Module):
         if prototypes.shape[0] < 4:
             return torch.tensor(0.0, device=prototypes.device)
 
-        # Normalized prototypes
         p = F.normalize(prototypes, p=2, dim=-1)
-        # Cosine similarity matrix [4, 4]
         sim_mat = torch.mm(p, p.t())
 
-        # Target similarity matrix based on true 2D direction angles:
-        # Angles: Right: 0°, Forward: 90°, Left: 180°, Backward: 270°
-        # Target Cosine: cos(θ_i - θ_j)
-        # Class 0: Left (180°), Class 1: Right (0°), Class 2: Forward (90°), Class 3: Backward (270°)
         target_sim = torch.tensor([
-            [ 1.0, -1.0,  0.0,  0.0], # Left vs [Left, Right, Fwd, Bwd]
-            [-1.0,  1.0,  0.0,  0.0], # Right
-            [ 0.0,  0.0,  1.0, -1.0], # Forward
-            [ 0.0,  0.0, -1.0,  1.0]  # Backward
+            [ 1.0, -1.0,  0.0,  0.0],  # Left vs [Left, Right, Fwd, Bwd]
+            [-1.0,  1.0,  0.0,  0.0],  # Right
+            [ 0.0,  0.0,  1.0, -1.0],  # Forward
+            [ 0.0,  0.0, -1.0,  1.0]   # Backward
         ], device=prototypes.device, dtype=prototypes.dtype)
 
-        angular_penalty = F.mse_loss(sim_mat, target_sim)
-        return self.lambda_angular * angular_penalty
+        return self.lambda_angular * F.mse_loss(sim_mat, target_sim)

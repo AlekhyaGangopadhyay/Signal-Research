@@ -1,109 +1,92 @@
-# Few-Shot EEG Direction Detection System
+# Few-Shot EEG Direction Detection
 
-Deep Metric Meta-Learning pipeline for 4-class directional intent decoding (`Left`, `Right`, `Forward`, `Backward`) from multi-channel bipolar EEG signals.
+Pipeline for decoding 4 viewed directions (`left`, `right`, `forward`, `backward`) from 18-channel bipolar EEG,
+with few-shot calibration on new subjects (prototypical network), plus classical baselines and data-validity checks.
 
----
+## Status (2026-10-10)
 
-## 📁 Project Structure
+**The current recordings do not contain detectable EEG.** All 23 files have a flat spectrum, Gaussian amplitudes,
+no eye blinks and no response time-locked to the stimulus (`results/sanity_report.md`). Every baseline and the deep
+model are at chance, and the shuffled-label controls score the same. Earlier accuracies of up to 55% came from
+labelling files by their order and from test trials that duplicated calibration trials. See
+[CRITICAL_REVIEW.md](CRITICAL_REVIEW.md) for the analysis and [WORKLOG.md](WORKLOG.md) for every change made since.
+
+The code is ready for valid data. What's needed on the recording side is in
+[docs/DATA_CONVERSION_AND_EXECUTION_GUIDE.md §8](docs/DATA_CONVERSION_AND_EXECUTION_GUIDE.md#8-what-the-data-needs-before-decoding-can-work).
+
+## Project structure
 
 ```
-e:\EEG-direction-detection\
-├── Documenations\
-│   ├── RESEARCH_DOCUMENTATION.md              # Complete theoretical methodology & papers
-│   └── DATA_CONVERSION_AND_EXECUTION_GUIDE.md # Operational handbook & protocol
-├── Raw data\                                  # Original EEG ASCII text dumps
-│   ├── Raw data(Subject 3)\
-│   ├── Raw data(Subject Gope)\
-│   └── Raw data(Subject Supra)\
-├── Stimuli\                                   # Synchronized stimulus video
-├── processed_data\                            # Generated structured datasets
-│   ├── metadata.csv                           # Master manifest of all trial metadata
-│   ├── csv_trials\                            # Human-readable CSV per single trial
-│   └── tensors\                               # High-speed PyTorch .npz tensor archives
-├── checkpoints\                               # Saved model weights (.pth)
-├── results\                                   # Generated plots & evaluation reports
-├── src\
-│   ├── __init__.py
-│   ├── config.py                              # Centralized configuration & hyperparams
-│   ├── preprocessing.py                       # Butterworth Bandpass, Notch & Z-score
-│   ├── convert_raw_data.py                    # ETL pipeline converting raw text to CSV/NPZ
-│   ├── dataset.py                             # PyTorch Episodic (N-way K-shot) Dataset
-│   ├── models.py                              # SpatialTemporalProtoNet & EEGNet backbones
-│   ├── losses.py                              # Prototypical Loss & Angular Margin Loss
-│   ├── train_fewshot.py                       # Meta-learning episodic training engine
-│   ├── evaluate.py                            # LOSO-CV cross-validation & visualizer
-│   └── inference.py                           # Single-trial real-time predictor
-├── requirements.txt                           # Python dependencies
-├── run_pipeline.py                            # Master one-click execution pipeline
-└── README.md                                  # Project overview & instructions
+Signal-Research/
+├── Raw data/                  raw exports, one folder per subject, one .txt per recording
+├── Stimuli/                   stimulus video (12 blocks: arrows, letters, words)
+├── stimulus_offsets.json      per-file video start inside each recording (currently unverified 0.0)
+├── src/
+│   ├── config.py              paths, 256 Hz signal settings, training defaults, set_seed()
+│   ├── raw_io.py              strict parser for the raw exports (all pages, channel checks)
+│   ├── stimulus.py            video timeline, per-file offsets, stimulus-locked windows
+│   ├── preprocessing.py       filters (offline + causal), robust scaling, Euclidean alignment, artifact flags
+│   ├── convert_raw_data.py    raw -> processed_data/tensors/subject_*.npz + metadata.csv
+│   ├── sanity.py              is it EEG? alignment-free folding test, lag scan, positive control
+│   ├── dataset.py             episodes without replacement, cross-recording calibration splits
+│   ├── baselines.py           band power, FBCSP, Riemannian tangent space / MDM
+│   ├── stats.py               block-bootstrap CIs, block-permutation tests
+│   ├── models.py              multi-scale EEGNet-style ProtoNet (7k params), EEGNet, AdaBN
+│   ├── losses.py              prototypical loss, optional directional angular loss
+│   ├── train_fewshot.py       episodic training with early stopping on held-out recordings
+│   ├── evaluate.py            LOSO few-shot evaluation with shuffled-label control
+│   └── inference.py           label-aware calibration, checkpoint-driven config, streaming predictor
+├── tests/                     pytest suite (37 tests, synthetic data)
+├── analysis/                  scripts behind CRITICAL_REVIEW.md
+├── docs/                      data guide and research plan
+├── run_pipeline.py            runs sanity -> conversion -> baselines -> LOSO
+└── WORKLOG.md                 timestamped log of changes
 ```
 
----
+Generated folders (`processed_data/`, `checkpoints/`, `results/`) are not tracked by git.
 
-## ⚙️ Setup & Installation
+## Setup
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt     # Python >= 3.10
+.venv/Scripts/python -m pytest tests              # 37 tests
 ```
 
----
+## Running
 
-## 🚀 Execution Guide
-
-### 1. Convert Raw Data to Structured CSVs and NPZ Tensors
 ```bash
-python -m src.convert_raw_data
+python -m src.sanity                      # 1. check the data is EEG and stimulus-related (do this first)
+python -m src.convert_raw_data            # 2. build stimulus-locked epochs (add --csv for per-window CSVs)
+python -m src.baselines                   # 3. classical baselines with CIs, p-values and shuffled controls
+python -m src.evaluate --shots 1 3 5 10   # 4. LOSO few-shot ProtoNet (+ shuffled-label control model)
+python run_pipeline.py                    #    or all four in order
 ```
-- Parses all 18 bipolar channels.
-- Applies $0.5 - 45\text{ Hz}$ bandpass and $50\text{ Hz}$ notch filtering.
-- Slices into $2.0\text{s}$ ($500$ sample) directional trials.
-- Exports individual CSVs to `processed_data/csv_trials/` and subject arrays to `processed_data/tensors/`.
-- Generates `processed_data/metadata.csv`.
 
----
+Useful options: `src.evaluate --model eegnet`, `--alignment none`, `--no-adabn`, `--angular` (for the ablation).
 
-### 2. Meta-Learning Training
-```bash
-python -m src.train_fewshot --k_shot 5 --epochs 80 --model spatial_temporal
-```
-Options:
-- `--k_shot`: Number of calibration support shots per class (default: `5`).
-- `--epochs`: Total meta-training epochs (default: `80`).
-- `--model`: Backbone architecture (`spatial_temporal` or `eegnet`).
+## Inference
 
----
-
-### 3. Cross-Validation & Metric Reporting (LOSO-CV)
-```bash
-python -m src.evaluate
-```
-- Evaluates meta-learning generalization on unseen target subjects.
-- Computes **4-Way Accuracy (%)**, **Cohen's Kappa ($\kappa$)**, and **Information Transfer Rate (ITR)**.
-- Saves publication-quality plots to `results/`:
-  - `results/fewshot_scaling_curve.png` (Performance across $K=1, 3, 5, 10$ shots).
-  - `results/confusion_matrix_k5.png` (Class-level directional confusion matrix).
-
----
-
-### 4. Single-Trial Test-Time Inference
 ```python
-from src.inference import DirectionPredictor
 import numpy as np
+from src.inference import DirectionPredictor, StreamingPredictor
 
-predictor = DirectionPredictor(checkpoint_path="checkpoints/protonet_spatial_temporal_5shot.pth")
+predictor = DirectionPredictor("checkpoints/protonet_spatial_temporal.pth")   # from python -m src.train_fewshot
 
-# Calibrate on target subject using K-shot support trials:
-# predictor.calibrate(support_trials, support_labels, k_shot=5)
+# Calibrate with preprocessed windows [N, 18, 512] from the new subject, labels in any order:
+predictor.calibrate(support_windows, ["left", "right", "forward", "backward", ...])
+direction, confidences = predictor.predict_trial(window)                      # window: [18, 512]
 
-# Predict single trial from CSV:
-direction, confidences = predictor.predict_from_csv("processed_data/csv_trials/sub01_f01_ep001_left.csv")
-print(f"Predicted Direction: {direction}")
-print(f"Confidences: {confidences}")
+# Real time: causal filtering of a raw stream
+stream = StreamingPredictor(predictor, calibration_raw=raw_recording)         # raw [18, T]
+stream.push(raw_chunk)                                                        # [18, n] as it arrives
+if stream.ready():
+    print(stream.predict())
 ```
 
----
+## Evaluation protocol
 
-### 5. One-Click Master Pipeline
-```bash
-python run_pipeline.py --epochs 40 --shots 1 3 5
-```
+- Labels come from the stimulus timeline. Each recording contains all 4 directions, 3 times each.
+- No sampling with replacement. Support and query come from different stimulus blocks.
+- Few-shot: calibrate on one recording of the unseen subject, test on all of its other recordings.
+- Every number is reported with a block-bootstrap 95% CI and a block-permutation p-value, next to a shuffled-label control and classical baselines.
